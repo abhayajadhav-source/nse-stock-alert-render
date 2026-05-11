@@ -1,0 +1,3 @@
+yfinance>=0.2.40
+feedparser>=6.0.11
+psycopg2-binary>=2.9.9
