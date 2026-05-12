@@ -1,7 +1,6 @@
 """
 Configuration for the NSE Stock News Alert System (Render edition).
-All thresholds and runtime parameters live here so you can tune
-behaviour without touching the rest of the codebase.
+All thresholds and runtime parameters live here.
 """
 
 import os
@@ -10,33 +9,31 @@ from zoneinfo import ZoneInfo
 
 
 # ---------------------------------------------------------------------------
-# SECRETS — loaded from Render environment variables
+# SECRETS
 # ---------------------------------------------------------------------------
 GMAIL_SENDER       = os.getenv("GMAIL_SENDER", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 GMAIL_RECIPIENT    = os.getenv("GMAIL_RECIPIENT", "")
-
-# Postgres connection string — auto-injected when DB is linked in render.yaml
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL       = os.getenv("DATABASE_URL", "")
 
 # ---------------------------------------------------------------------------
-# MARKET HOURS (Indian Standard Time)
+# MARKET HOURS (IST)
 # ---------------------------------------------------------------------------
 IST = ZoneInfo("Asia/Kolkata")
 SCAN_START_TIME = dtime(9, 0)
 SCAN_END_TIME   = dtime(15, 45)
 
-# Skip market-hours check entirely if set to "true".
 FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 
 # RUN_MODE controls what the entry script does:
-#   "test"        → send a test email and exit
-#   "momentum"    → run 30-day gainers/losers report (always, no market check)
-#   (empty)       → default: run the 30-min intraday scanner
+#   "test"      → send test email and exit
+#   "momentum"  → 30-day gainers/losers report
+#   "reversal"  → trend reversal report (NEW)
+#   (empty)     → default: intraday scanner
 RUN_MODE = os.getenv("RUN_MODE", "").lower()
 
 # ---------------------------------------------------------------------------
-# GAP DETECTION THRESHOLDS (intraday scanner)
+# GAP DETECTION (intraday scanner)
 # ---------------------------------------------------------------------------
 GAP_UP_THRESHOLD   = 2.0
 GAP_DOWN_THRESHOLD = -2.0
@@ -45,7 +42,7 @@ INTRADAY_MOVE_THRESHOLD = 3.0
 VOLUME_SPIKE_MULTIPLIER = 2.0
 
 # ---------------------------------------------------------------------------
-# 52-WEEK HIGH/LOW DETECTION (intraday scanner)
+# 52-WEEK HIGH/LOW (intraday scanner)
 # ---------------------------------------------------------------------------
 NEAR_52W_HIGH_PCT      = 2.0
 NEAR_52W_LOW_PCT       = 2.0
@@ -75,30 +72,61 @@ HIGH_PRIORITY_KEYWORDS = [
 # ---------------------------------------------------------------------------
 # 30-DAY MOMENTUM REPORT
 # ---------------------------------------------------------------------------
-# Window of trading days to look back. 21 trading days ≈ 30 calendar days.
-MOMENTUM_LOOKBACK_DAYS = 30
+MOMENTUM_LOOKBACK_DAYS    = 30
+MOMENTUM_GAIN_THRESHOLD   = 10.0
+MOMENTUM_LOSS_THRESHOLD   = -7.0
+MOMENTUM_MAX_PER_SECTION  = 30
 
-# Stock qualifies as a "gainer" if it's up at least this much vs N days ago
-MOMENTUM_GAIN_THRESHOLD = 10.0   # +10%
+# ---------------------------------------------------------------------------
+# TREND REVERSAL DETECTION (NEW)
+# ---------------------------------------------------------------------------
+# Moving average periods — classic short/long combination for crossovers.
+SMA_SHORT = 20   # 20-day SMA
+SMA_LONG  = 50   # 50-day SMA
+# Look-back window (trading days) for detecting a fresh crossover.
+# Smaller = only the freshest signals; larger = catches lagging crossovers too.
+MA_CROSSOVER_LOOKBACK_DAYS = 5
 
-# Stock qualifies as a "loser" if it's down at least this much
-MOMENTUM_LOSS_THRESHOLD = -7.0   # -7%
+# RSI — Relative Strength Index settings.
+RSI_PERIOD          = 14
+RSI_OVERSOLD        = 30    # below this = oversold zone
+RSI_OVERBOUGHT      = 70    # above this = overbought zone
+RSI_BULL_CONFIRM    = 40    # RSI must climb back above this to confirm bull reversal
+RSI_BEAR_CONFIRM    = 60    # RSI must drop below this to confirm bear reversal
+RSI_LOOKBACK_DAYS   = 10    # how recently the oversold/overbought touch happened
 
-# Hard cap on rows per section (gainers/losers) in the email — keeps it readable
-MOMENTUM_MAX_PER_SECTION = 30
+# MACD — Moving Average Convergence Divergence settings.
+MACD_FAST   = 12
+MACD_SLOW   = 26
+MACD_SIGNAL = 9
+MACD_CROSSOVER_LOOKBACK_DAYS = 5
+
+# Volume confirmation — recent N-day vol vs longer-window vol.
+VOLUME_CONFIRM_RECENT_DAYS = 5
+VOLUME_CONFIRM_BASE_DAYS   = 20
+VOLUME_CONFIRM_RATIO       = 1.5   # 1.5x base average
+
+# Swing-low/high pattern — requires N higher lows or lower highs.
+SWING_WINDOW_DAYS  = 30
+SWING_PIVOT_RADIUS = 3   # a pivot is a local min/max over +/- 3 days
+
+# Minimum signal count to be flagged. We have 5 signals; 3 = strong confirmation.
+REVERSAL_MIN_SIGNALS_REQUIRED = 3
+
+# Hard cap on rows per section in the email
+REVERSAL_MAX_PER_SECTION = 25
 
 # ---------------------------------------------------------------------------
 # SCANNING BEHAVIOUR (intraday scanner)
 # ---------------------------------------------------------------------------
-ALERT_COOLDOWN_SECONDS = 7200   # 2 hours
+ALERT_COOLDOWN_SECONDS = 7200
 YF_RETRIES             = 2
 MAX_ALERTS_PER_CYCLE   = 15
 
 # ---------------------------------------------------------------------------
 # EMAIL BEHAVIOUR
 # ---------------------------------------------------------------------------
-EMAIL_BATCH_MODE     = True
-EMAIL_SUBJECT_PREFIX = "[NSE Alert]"
-
-# Separate prefix for the momentum report so you can filter it differently in Gmail
+EMAIL_BATCH_MODE       = True
+EMAIL_SUBJECT_PREFIX   = "[NSE Alert]"
 MOMENTUM_SUBJECT_PREFIX = "[NSE Momentum]"
+REVERSAL_SUBJECT_PREFIX = "[NSE Reversal]"
