@@ -3,8 +3,9 @@ Single-shot entry point — Render's cron service runs this once, then exits.
 
 Branches on RUN_MODE env var:
   "test"      → send a test email and exit
-  "momentum"  → run the 30-day gainers/losers report
-  (default)   → run the intraday scanner (gap/breakout/52w/volume)
+  "momentum"  → 30-day gainers/losers report
+  "reversal"  → trend reversal report (daily timeframe)
+  (default)   → intraday scanner (gap/breakout/52w/volume)
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from config import (
 from gmail_notifier import send_batch_alert, send_test_email
 from momentum_report import run_momentum_report
 from news_fetcher import NewsItem, fetch_news_for_stock
+from reversal_report import run_reversal_report
 from state_manager import cleanup_old_entries, mark_alert_sent, should_send_alert
 from stock_analyzer import StockData, fetch_stock_data
 from stock_list import get_all_symbols
@@ -91,7 +93,6 @@ def rank_alerts(stocks: List[StockData]) -> List[StockData]:
 
 
 def run_intraday_scan() -> dict:
-    """Standard intraday scan — gap/breakout/52w/volume detection."""
     logger.info("=" * 60)
     logger.info("Starting intraday scan at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -137,13 +138,13 @@ def run_intraday_scan() -> dict:
 # Main dispatcher
 # ---------------------------------------------------------------------------
 def main() -> int:
-    # --- Test mode: send test email and exit ---
+    # --- Test mode ---
     if RUN_MODE == "test":
-        logger.info("RUN_MODE=test → sending test email and exiting")
+        logger.info("RUN_MODE=test → sending test email")
         ok = send_test_email()
         return 0 if ok else 1
 
-    # --- Momentum mode: 30-day gainers/losers report, always runs ---
+    # --- Momentum mode (30-day gainers/losers) ---
     if RUN_MODE == "momentum":
         logger.info("RUN_MODE=momentum → running 30-day momentum report")
         try:
@@ -152,6 +153,17 @@ def main() -> int:
             return 0
         except Exception as e:
             logger.exception("Momentum report failed: %s", e)
+            return 1
+
+    # --- Reversal mode (trend reversal candidates) ---
+    if RUN_MODE == "reversal":
+        logger.info("RUN_MODE=reversal → running trend-reversal report")
+        try:
+            stats = run_reversal_report()
+            logger.info("Reversal complete: %s", stats)
+            return 0
+        except Exception as e:
+            logger.exception("Reversal report failed: %s", e)
             return 1
 
     # --- Default: intraday scanner, gated by market hours ---
