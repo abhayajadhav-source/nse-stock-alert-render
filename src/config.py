@@ -89,4 +89,16 @@ MOMENTUM_MAX_PER_SECTION = 30
 
 # ---------------------------------------------------------------------------
 # SCANNING BEHAVIOUR (intraday scanner)
-# ---------------------
+# ---------------------------------------------------------------------------
+ALERT_COOLDOWN_SECONDS = 7200   # 2 hours
+YF_RETRIES             = 2
+MAX_ALERTS_PER_CYCLE   = 15
+
+# ---------------------------------------------------------------------------
+# EMAIL BEHAVIOUR
+# ---------------------------------------------------------------------------
+EMAIL_BATCH_MODE     = True
+EMAIL_SUBJECT_PREFIX = "[NSE Alert]"
+
+# Separate prefix for the momentum report so you can filter it differently in Gmail
+MOMENTUM_SUBJECT_PREFIX = "[NSE Momentum]"
