@@ -1,9 +1,10 @@
 """
-Single-shot scanner — Render's cron service runs this once, then exits.
+Single-shot entry point — Render's cron service runs this once, then exits.
 
-Render spins up a fresh container for each cron trigger, runs this
-script, and tears the container down after exit. State persists in
-Postgres (via state_manager.py), so cooldowns survive across runs.
+Branches on RUN_MODE env var:
+  "test"      → send a test email and exit
+  "momentum"  → run the 30-day gainers/losers report
+  (default)   → run the intraday scanner (gap/breakout/52w/volume)
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from config import (
     SCAN_END_TIME, SCAN_START_TIME,
 )
 from gmail_notifier import send_batch_alert, send_test_email
+from momentum_report import run_momentum_report
 from news_fetcher import NewsItem, fetch_news_for_stock
 from state_manager import cleanup_old_entries, mark_alert_sent, should_send_alert
 from stock_analyzer import StockData, fetch_stock_data
@@ -31,6 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Intraday scanner helpers
+# ---------------------------------------------------------------------------
 def is_market_hours() -> bool:
     now = datetime.now(IST)
     if now.weekday() >= 5:
@@ -85,9 +90,11 @@ def rank_alerts(stocks: List[StockData]) -> List[StockData]:
     return sorted(stocks, key=score, reverse=True)
 
 
-def run_scan_cycle() -> dict:
+def run_intraday_scan() -> dict:
+    """Standard intraday scan — gap/breakout/52w/volume detection."""
     logger.info("=" * 60)
-    logger.info("Starting scan at %s IST", datetime.now(IST).strftime("%H:%M:%S"))
+    logger.info("Starting intraday scan at %s IST",
+                datetime.now(IST).strftime("%H:%M:%S"))
     logger.info("=" * 60)
 
     symbols = get_all_symbols()
@@ -126,22 +133,38 @@ def run_scan_cycle() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Main dispatcher
+# ---------------------------------------------------------------------------
 def main() -> int:
+    # --- Test mode: send test email and exit ---
     if RUN_MODE == "test":
         logger.info("RUN_MODE=test → sending test email and exiting")
         ok = send_test_email()
         return 0 if ok else 1
 
+    # --- Momentum mode: 30-day gainers/losers report, always runs ---
+    if RUN_MODE == "momentum":
+        logger.info("RUN_MODE=momentum → running 30-day momentum report")
+        try:
+            stats = run_momentum_report()
+            logger.info("Momentum complete: %s", stats)
+            return 0
+        except Exception as e:
+            logger.exception("Momentum report failed: %s", e)
+            return 1
+
+    # --- Default: intraday scanner, gated by market hours ---
     if not FORCE_RUN and not is_market_hours():
-        logger.info("Outside market hours — skipping scan")
+        logger.info("Outside market hours — skipping intraday scan")
         return 0
 
     try:
-        stats = run_scan_cycle()
-        logger.info("Scan complete: %s", stats)
+        stats = run_intraday_scan()
+        logger.info("Intraday scan complete: %s", stats)
         return 0
     except Exception as e:
-        logger.exception("Scan failed: %s", e)
+        logger.exception("Intraday scan failed: %s", e)
         return 1
 
 
