@@ -74,9 +74,13 @@ HIGH_PRIORITY_KEYWORDS = [
 # ---------------------------------------------------------------------------
 # SCANNING BEHAVIOUR
 # ---------------------------------------------------------------------------
-ALERT_COOLDOWN_SECONDS = 3600
-YF_RETRIES             = 2
-MAX_ALERTS_PER_CYCLE   = 15
+# Cooldown — don't re-alert same (stock, signal) more often than this.
+# At 30-min cadence, a 2-hour cooldown means a stock can re-alert after
+# ~4 skipped cycles. Bump higher for less repetition, lower for more.
+ALERT_COOLDOWN_SECONDS = 7200   # 2 hours
+
+YF_RETRIES           = 2
+MAX_ALERTS_PER_CYCLE = 15
 
 # ---------------------------------------------------------------------------
 # EMAIL BEHAVIOUR
