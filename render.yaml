@@ -8,7 +8,7 @@ services:
     runtime: python
     plan: starter           # $1/mo minimum, billed per-second when running
     region: singapore       # closest to NSE data sources
-    schedule: "*/5 3-10 * * 1-5"   # every 5 min, 03:30-10:15 UTC, Mon-Fri
+    schedule: "*/30 3-10 * * 1-5"  # every 30 min, 03:30-10:15 UTC, Mon-Fri
                                    # = 09:00-15:45 IST coverage
     buildCommand: pip install -r requirements.txt
     startCommand: python src/scan_once.py
