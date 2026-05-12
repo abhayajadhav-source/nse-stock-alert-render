@@ -16,8 +16,7 @@ GMAIL_SENDER       = os.getenv("GMAIL_SENDER", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 GMAIL_RECIPIENT    = os.getenv("GMAIL_RECIPIENT", "")
 
-# Postgres connection string — Render injects this automatically when the
-# database is linked via render.yaml. Format: postgres://user:pass@host/db
+# Postgres connection string — auto-injected when DB is linked in render.yaml
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ---------------------------------------------------------------------------
@@ -28,14 +27,16 @@ SCAN_START_TIME = dtime(9, 0)
 SCAN_END_TIME   = dtime(15, 45)
 
 # Skip market-hours check entirely if set to "true".
-# Useful for one-off "Trigger Run" testing from the Render UI.
 FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 
-# RUN_MODE=test → send a test email and exit (skip scan).
+# RUN_MODE controls what the entry script does:
+#   "test"        → send a test email and exit
+#   "momentum"    → run 30-day gainers/losers report (always, no market check)
+#   (empty)       → default: run the 30-min intraday scanner
 RUN_MODE = os.getenv("RUN_MODE", "").lower()
 
 # ---------------------------------------------------------------------------
-# GAP DETECTION THRESHOLDS
+# GAP DETECTION THRESHOLDS (intraday scanner)
 # ---------------------------------------------------------------------------
 GAP_UP_THRESHOLD   = 2.0
 GAP_DOWN_THRESHOLD = -2.0
@@ -44,7 +45,7 @@ INTRADAY_MOVE_THRESHOLD = 3.0
 VOLUME_SPIKE_MULTIPLIER = 2.0
 
 # ---------------------------------------------------------------------------
-# 52-WEEK HIGH/LOW DETECTION
+# 52-WEEK HIGH/LOW DETECTION (intraday scanner)
 # ---------------------------------------------------------------------------
 NEAR_52W_HIGH_PCT      = 2.0
 NEAR_52W_LOW_PCT       = 2.0
@@ -72,18 +73,20 @@ HIGH_PRIORITY_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# SCANNING BEHAVIOUR
+# 30-DAY MOMENTUM REPORT
 # ---------------------------------------------------------------------------
-# Cooldown — don't re-alert same (stock, signal) more often than this.
-# At 30-min cadence, a 2-hour cooldown means a stock can re-alert after
-# ~4 skipped cycles. Bump higher for less repetition, lower for more.
-ALERT_COOLDOWN_SECONDS = 7200   # 2 hours
+# Window of trading days to look back. 21 trading days ≈ 30 calendar days.
+MOMENTUM_LOOKBACK_DAYS = 30
 
-YF_RETRIES           = 2
-MAX_ALERTS_PER_CYCLE = 15
+# Stock qualifies as a "gainer" if it's up at least this much vs N days ago
+MOMENTUM_GAIN_THRESHOLD = 10.0   # +10%
+
+# Stock qualifies as a "loser" if it's down at least this much
+MOMENTUM_LOSS_THRESHOLD = -7.0   # -7%
+
+# Hard cap on rows per section (gainers/losers) in the email — keeps it readable
+MOMENTUM_MAX_PER_SECTION = 30
 
 # ---------------------------------------------------------------------------
-# EMAIL BEHAVIOUR
-# ---------------------------------------------------------------------------
-EMAIL_BATCH_MODE     = True
-EMAIL_SUBJECT_PREFIX = "[NSE Alert]"
+# SCANNING BEHAVIOUR (intraday scanner)
+# ---------------------
