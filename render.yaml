@@ -1,13 +1,15 @@
-# Render Blueprint — defines our cron job + free Postgres database.
-# When you connect this repo to Render, it reads this file and provisions
-# everything in one click.
+# Render Blueprint — defines two cron jobs and one shared Postgres database.
+#
+# Job 1: nse-stock-alert         → intraday scanner, every 30 min, market hours
+# Job 2: nse-momentum-report     → 30-day gainers/losers, once daily at 17:30 IST
 
 services:
+  # ----------- Intraday scanner (existing) -----------
   - type: cron
     name: nse-stock-alert
     runtime: python
-    plan: starter           # $1/mo minimum, billed per-second when running
-    region: singapore       # closest to NSE data sources
+    plan: starter
+    region: singapore
     schedule: "*/30 3-10 * * 1-5"  # every 30 min, 03:30-10:15 UTC, Mon-Fri
                                    # = 09:00-15:45 IST coverage
     buildCommand: pip install -r requirements.txt
@@ -19,12 +21,30 @@ services:
         fromDatabase:
           name: nse-alert-state
           property: connectionString
-      # Gmail credentials are set manually in the dashboard for security.
-      # Render won't expose them in the YAML.
+
+  # ----------- 30-day momentum report (new) -----------
+  - type: cron
+    name: nse-momentum-report
+    runtime: python
+    plan: starter
+    region: singapore
+    schedule: "0 12 * * 1-5"       # 12:00 UTC = 17:30 IST, Mon-Fri (after close)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/scan_once.py
+    envVars:
+      - key: TZ
+        value: Asia/Kolkata
+      - key: RUN_MODE             # this is what makes it run the momentum report
+        value: momentum
+      # The momentum report doesn't need the database, but harmless to include.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nse-alert-state
+          property: connectionString
 
 databases:
   - name: nse-alert-state
-    plan: free              # 1 GB Postgres, free forever
+    plan: free
     region: singapore
     databaseName: nse_alerts
     user: nse_alerts_user
