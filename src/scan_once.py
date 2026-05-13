@@ -6,6 +6,9 @@ Branches on RUN_MODE env var:
   "momentum"  → 30-day gainers/losers report
   "reversal"  → trend reversal report (daily timeframe)
   (default)   → intraday scanner (gap/breakout/52w/volume)
+
+Every report mode also saves a snapshot to Postgres so the dashboard
+can display the latest state without re-running the scan.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from gmail_notifier import send_batch_alert, send_test_email
 from momentum_report import run_momentum_report
 from news_fetcher import NewsItem, fetch_news_for_stock
 from reversal_report import run_reversal_report
+from snapshot_store import save_snapshot
 from state_manager import cleanup_old_entries, mark_alert_sent, should_send_alert
 from stock_analyzer import StockData, fetch_stock_data
 from stock_list import get_all_symbols
@@ -92,7 +96,34 @@ def rank_alerts(stocks: List[StockData]) -> List[StockData]:
     return sorted(stocks, key=score, reverse=True)
 
 
+def _build_intraday_snapshot_items(stocks: List[StockData]) -> List[dict]:
+    """Convert StockData objects into JSON-friendly dicts for snapshot storage."""
+    items = []
+    for stock in stocks:
+        items.append({
+            "symbol":           stock.symbol,
+            "price":            round(stock.current_price, 2),
+            "pct_change":       round(stock.total_pct_change, 2),
+            "gap_pct":          round(stock.gap_pct, 2),
+            "intraday_pct":     round(stock.intraday_pct, 2),
+            "volume_ratio":     round(stock.volume_ratio, 2),
+            "is_gap_up":        stock.is_gap_up,
+            "is_gap_down":      stock.is_gap_down,
+            "is_breakout_up":   stock.is_breakout_up,
+            "is_breakout_down": stock.is_breakout_down,
+            "is_new_52w_high":  stock.is_new_52w_high,
+            "is_new_52w_low":   stock.is_new_52w_low,
+            "is_near_52w_high": stock.is_near_52w_high,
+            "is_near_52w_low":  stock.is_near_52w_low,
+            "has_volume_spike": stock.has_volume_spike,
+            "high_52w":         round(stock.high_52w, 2),
+            "low_52w":          round(stock.low_52w, 2),
+        })
+    return items
+
+
 def run_intraday_scan() -> dict:
+    """Standard intraday scan — gap/breakout/52w/volume detection."""
     logger.info("=" * 60)
     logger.info("Starting intraday scan at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -107,6 +138,7 @@ def run_intraday_scan() -> dict:
     ranked   = rank_alerts(significant)
     to_alert = ranked[:MAX_ALERTS_PER_CYCLE]
 
+    # Cooldown filter
     alerts_to_send: List[Tuple[StockData, List[NewsItem]]] = []
     for stock in to_alert:
         signal = get_primary_signal(stock)
@@ -116,6 +148,7 @@ def run_intraday_scan() -> dict:
         news_items = fetch_news_for_stock(stock.symbol)
         alerts_to_send.append((stock, news_items))
 
+    # Send batch email if there's anything new
     sent = 0
     if alerts_to_send and EMAIL_BATCH_MODE:
         if send_batch_alert(alerts_to_send):
@@ -127,6 +160,17 @@ def run_intraday_scan() -> dict:
             logger.error("✗ Batch email failed")
 
     cleanup_old_entries()
+
+    # --- Save snapshot for the dashboard ---
+    # We save ALL significant stocks (not just those that passed cooldown) so
+    # the dashboard reflects current state, not just freshly-emailed alerts.
+    snapshot_items = _build_intraday_snapshot_items(ranked[:MAX_ALERTS_PER_CYCLE])
+    save_snapshot("intraday", snapshot_items, {
+        "alerts_sent":  sent,
+        "scan_time":    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "universe_size": len(symbols),
+    })
+
     return {
         "total_scanned":  len(symbols),
         "significant":    len(significant),
