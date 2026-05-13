@@ -9,7 +9,9 @@ A stock is flagged when at least N of these signals confirm:
   4. Volume          (recent volume meaningfully above longer-window average)
   5. Pivot structure (higher lows for bullish, lower highs for bearish)
 
-Output: one consolidated email with two tables — bullish and bearish candidates.
+Output:
+  1. Email with two tables: bullish and bearish candidates
+  2. Snapshot saved to Postgres for the dashboard
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional
 
+import pandas as pd
 import yfinance as yf
 
 from config import (
@@ -36,6 +39,7 @@ from config import (
     SWING_WINDOW_DAYS, VOLUME_CONFIRM_BASE_DAYS, VOLUME_CONFIRM_RATIO,
     VOLUME_CONFIRM_RECENT_DAYS, YF_RETRIES,
 )
+from snapshot_store import save_snapshot
 from stock_list import NSE_STOCKS, get_all_symbols, get_yf_symbol
 from technical_indicators import (
     find_pivot_highs, find_pivot_lows, has_crossed_above, has_crossed_below,
@@ -57,25 +61,35 @@ class ReversalSignal:
     name: str
     current_price: float
     pct_change_1d: float
-    direction: str               # "bullish" or "bearish"
-    signal_count: int            # 0-5
+    direction: str
+    signal_count: int
 
-    # Individual signal flags
     has_ma_signal:     bool = False
     has_rsi_signal:    bool = False
     has_macd_signal:   bool = False
     has_volume_signal: bool = False
     has_pivot_signal:  bool = False
 
-    # Indicator values for context in the report
     rsi_value:        float = 0.0
     sma_short_value:  float = 0.0
     sma_long_value:   float = 0.0
     macd_histogram:   float = 0.0
     volume_ratio:     float = 0.0
 
-    # Human-readable list of which signals fired
     confirmations: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Safe-NaN helper (avoids pandas version quirks)
+# ---------------------------------------------------------------------------
+def _safe_float(value, default: float = 0.0) -> float:
+    """Return float(value) or `default` if NaN/None."""
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -84,16 +98,14 @@ class ReversalSignal:
 def _analyze_stock(symbol: str) -> Optional[ReversalSignal]:
     """
     Pull ~6 months of daily data and run every reversal check.
-    Returns None if data is missing or no reversal flag fires.
-    Returns the strongest direction (bullish OR bearish) when both somehow
-    appear (rare in practice; one usually dominates).
+    Returns the stronger direction (bullish or bearish) if it meets the
+    minimum signal threshold, else None.
     """
     yf_symbol = get_yf_symbol(symbol)
 
     for attempt in range(YF_RETRIES + 1):
         try:
             ticker = yf.Ticker(yf_symbol)
-            # 6 months gives enough history for 50 SMA + indicator warm-up
             hist = ticker.history(period="6mo", interval="1d")
             if hist.empty or len(hist) < SMA_LONG + 10:
                 return None
@@ -111,18 +123,18 @@ def _analyze_stock(symbol: str) -> Optional[ReversalSignal]:
     prev    = float(close.iloc[-2])
     pct_1d  = ((current - prev) / prev) * 100 if prev > 0 else 0.0
 
-    # --- Compute indicators (used by both bull and bear branches) ---
+    # --- Compute indicators ---
     sma_s        = sma(close, SMA_SHORT)
     sma_l        = sma(close, SMA_LONG)
     rsi_series   = rsi(close, RSI_PERIOD)
     macd_line, signal_line, histogram = macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
 
-    rsi_now      = float(rsi_series.iloc[-1]) if pd.notna_safe(rsi_series.iloc[-1]) else 50.0
-    sma_s_now    = float(sma_s.iloc[-1])      if not pd.isna(sma_s.iloc[-1])      else current
-    sma_l_now    = float(sma_l.iloc[-1])      if not pd.isna(sma_l.iloc[-1])      else current
-    hist_now     = float(histogram.iloc[-1])  if not pd.isna(histogram.iloc[-1])  else 0.0
+    rsi_now    = _safe_float(rsi_series.iloc[-1], default=50.0)
+    sma_s_now  = _safe_float(sma_s.iloc[-1],      default=current)
+    sma_l_now  = _safe_float(sma_l.iloc[-1],      default=current)
+    hist_now   = _safe_float(histogram.iloc[-1],  default=0.0)
 
-    # Volume confirmation: recent-window avg vs base-window avg
+    # Volume confirmation
     recent_vol_avg = volume.iloc[-VOLUME_CONFIRM_RECENT_DAYS:].mean()
     base_vol_avg   = volume.iloc[-VOLUME_CONFIRM_BASE_DAYS:].mean()
     vol_ratio      = (recent_vol_avg / base_vol_avg) if base_vol_avg > 0 else 0.0
@@ -142,32 +154,27 @@ def _analyze_stock(symbol: str) -> Optional[ReversalSignal]:
         volume_ratio=vol_ratio,
     )
 
-    # Signal 1 — Golden cross (20 SMA crosses above 50 SMA) AND price above 50 SMA
     if has_crossed_above(sma_s, sma_l, MA_CROSSOVER_LOOKBACK_DAYS) and current > sma_l_now:
         bull.has_ma_signal = True
         bull.signal_count += 1
-        bull.confirmations.append(f"Golden cross (20>50 SMA), price > 50 SMA")
+        bull.confirmations.append("Golden cross (20>50 SMA), price > 50 SMA")
 
-    # Signal 2 — RSI was oversold within lookback window AND has climbed back above confirm level
     recent_rsi = rsi_series.iloc[-RSI_LOOKBACK_DAYS:]
     if (recent_rsi.min() < RSI_OVERSOLD) and (rsi_now > RSI_BULL_CONFIRM):
         bull.has_rsi_signal = True
         bull.signal_count += 1
         bull.confirmations.append(f"RSI {rsi_now:.0f} (was oversold, now climbing)")
 
-    # Signal 3 — MACD bullish cross with positive histogram
     if has_crossed_above(macd_line, signal_line, MACD_CROSSOVER_LOOKBACK_DAYS) and hist_now > 0:
         bull.has_macd_signal = True
         bull.signal_count += 1
         bull.confirmations.append(f"MACD bull cross (hist +{hist_now:.2f})")
 
-    # Signal 4 — Volume confirmation: recent 5-day avg >= 1.5x base 20-day avg
     if vol_ratio >= VOLUME_CONFIRM_RATIO:
         bull.has_volume_signal = True
         bull.signal_count += 1
         bull.confirmations.append(f"Volume {vol_ratio:.1f}x base")
 
-    # Signal 5 — Higher lows pattern in recent swing structure
     swing_window = close.iloc[-SWING_WINDOW_DAYS:]
     lows = find_pivot_lows(swing_window, radius=SWING_PIVOT_RADIUS)
     if has_higher_lows(lows, min_count=3):
@@ -193,7 +200,7 @@ def _analyze_stock(symbol: str) -> Optional[ReversalSignal]:
     if has_crossed_below(sma_s, sma_l, MA_CROSSOVER_LOOKBACK_DAYS) and current < sma_l_now:
         bear.has_ma_signal = True
         bear.signal_count += 1
-        bear.confirmations.append(f"Death cross (20<50 SMA), price < 50 SMA")
+        bear.confirmations.append("Death cross (20<50 SMA), price < 50 SMA")
 
     if (recent_rsi.max() > RSI_OVERBOUGHT) and (rsi_now < RSI_BEAR_CONFIRM):
         bear.has_rsi_signal = True
@@ -216,30 +223,12 @@ def _analyze_stock(symbol: str) -> Optional[ReversalSignal]:
         bear.signal_count += 1
         bear.confirmations.append("Lower highs pattern")
 
-    # Return whichever direction meets the threshold; if both, pick the stronger
+    # Return the stronger direction if it meets the threshold
     if bull.signal_count >= REVERSAL_MIN_SIGNALS_REQUIRED and bull.signal_count >= bear.signal_count:
         return bull
     if bear.signal_count >= REVERSAL_MIN_SIGNALS_REQUIRED:
         return bear
     return None
-
-
-# Small helper because pd.isna can fail on certain types in older pandas
-def _import_pandas_safe():
-    import pandas as pd
-    return pd
-
-pd = _import_pandas_safe()
-# Monkey-patched safe-NaN check used above
-class _PdHelper:
-    @staticmethod
-    def notna_safe(v):
-        try:
-            return not pd.isna(v)
-        except Exception:
-            return False
-# expose at module level for _analyze_stock above
-pd.notna_safe = _PdHelper.notna_safe  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -389,10 +378,39 @@ def _send_reversal_email(
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Snapshot builder + entry point
 # ---------------------------------------------------------------------------
+def _build_snapshot_items(bulls: List[ReversalSignal],
+                          bears: List[ReversalSignal]) -> List[dict]:
+    """Convert ReversalSignal objects into JSON-friendly dicts."""
+    items = []
+    for s in bulls + bears:
+        items.append({
+            "symbol":         s.symbol,
+            "name":           s.name,
+            "direction":      s.direction,
+            "signal_count":   s.signal_count,
+            "confirmations":  s.confirmations,
+            "price":          round(s.current_price, 2),
+            "pct_change_1d":  round(s.pct_change_1d, 2),
+            "rsi":            round(s.rsi_value, 1),
+            "sma_short":      round(s.sma_short_value, 2),
+            "sma_long":       round(s.sma_long_value, 2),
+            "macd_histogram": round(s.macd_histogram, 3),
+            "volume_ratio":   round(s.volume_ratio, 2),
+            "individual_signals": {
+                "ma":     s.has_ma_signal,
+                "rsi":    s.has_rsi_signal,
+                "macd":   s.has_macd_signal,
+                "volume": s.has_volume_signal,
+                "pivot":  s.has_pivot_signal,
+            },
+        })
+    return items
+
+
 def run_reversal_report() -> dict:
-    """Scan the universe, classify, and send the report."""
+    """Scan, classify, save snapshot, send email."""
     logger.info("=" * 60)
     logger.info("Starting trend-reversal scan at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -403,13 +421,11 @@ def run_reversal_report() -> dict:
 
     bulls: List[ReversalSignal] = []
     bears: List[ReversalSignal] = []
-    total_ok = 0
 
     for i, symbol in enumerate(symbols, 1):
         if i % 25 == 0:
             logger.info("Progress: %d/%d", i, len(symbols))
         result = _analyze_stock(symbol)
-        total_ok += 1 if result is not None or True else 0  # counted below
         if result is None:
             continue
         if result.direction == "bullish":
@@ -422,7 +438,7 @@ def run_reversal_report() -> dict:
             ", ".join(result.confirmations),
         )
 
-    # Rank by signal strength (more confirmations first), then by 1-day move
+    # Sort: stronger signals first
     bulls.sort(key=lambda s: (s.signal_count, s.pct_change_1d), reverse=True)
     bears.sort(key=lambda s: (s.signal_count, -s.pct_change_1d), reverse=True)
     bulls = bulls[:REVERSAL_MAX_PER_SECTION]
@@ -430,6 +446,16 @@ def run_reversal_report() -> dict:
 
     logger.info("Bullish: %d  ·  Bearish: %d  ·  Total scanned: %d",
                 len(bulls), len(bears), len(symbols))
+
+    # --- Save snapshot for the dashboard (before email so it persists even on email failure) ---
+    snapshot_items = _build_snapshot_items(bulls, bears)
+    save_snapshot("reversal", snapshot_items, {
+        "bullish_count":         len(bulls),
+        "bearish_count":         len(bears),
+        "total_scanned":         len(symbols),
+        "min_signals_required":  REVERSAL_MIN_SIGNALS_REQUIRED,
+        "report_time":           datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+    })
 
     sent = _send_reversal_email(bulls, bears, len(symbols))
     if sent:
