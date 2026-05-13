@@ -5,9 +5,9 @@ Runs once per day (separate cron from the intraday scanner). Always
 runs regardless of market hours, because it operates on closing prices
 that are already final.
 
-Output: one email with two tables:
-  - Top gainers (>= +10% over 30 days)
-  - Top losers  (<= -7% over 30 days)
+Output:
+  1. One email with two tables: top gainers and top losers
+  2. Snapshot saved to Postgres for the dashboard
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from config import (
     MOMENTUM_GAIN_THRESHOLD, MOMENTUM_LOOKBACK_DAYS, MOMENTUM_LOSS_THRESHOLD,
     MOMENTUM_MAX_PER_SECTION, MOMENTUM_SUBJECT_PREFIX, YF_RETRIES,
 )
+from snapshot_store import save_snapshot
 from stock_list import NSE_STOCKS, get_all_symbols, get_yf_symbol
 
 logger = logging.getLogger(__name__)
@@ -44,10 +45,10 @@ SMTP_PORT = 587
 class MomentumRow:
     symbol: str
     name: str
-    start_price: float       # close on the lookback start date
-    end_price:   float       # latest close
-    pct_change:  float       # (end - start) / start * 100
-    start_date:  str         # human-readable
+    start_price: float
+    end_price:   float
+    pct_change:  float
+    start_date:  str
     end_date:    str
 
 
@@ -55,22 +56,17 @@ class MomentumRow:
 # Price fetching — 30-day window
 # ---------------------------------------------------------------------------
 def _fetch_momentum_row(symbol: str) -> Optional[MomentumRow]:
-    """
-    Fetch ~30 trading days of daily bars and compute % change
-    from first close to last close.
-    """
+    """Fetch ~30 trading days of bars and compute % change from first to last close."""
     yf_symbol = get_yf_symbol(symbol)
 
-    # Fetch a bit more than the lookback window so we have headroom for
-    # weekends/holidays. "2mo" gives ~42 trading days, plenty for a 30-day window.
     for attempt in range(YF_RETRIES + 1):
         try:
             ticker = yf.Ticker(yf_symbol)
+            # "2mo" gives ~42 trading days — plenty for a 30-day window
             hist = ticker.history(period="2mo", interval="1d")
             if hist.empty or len(hist) < 2:
                 return None
 
-            # Anchor: the close N trading days ago (clamped if we don't have enough)
             anchor_idx = max(0, len(hist) - 1 - MOMENTUM_LOOKBACK_DAYS)
             start = hist.iloc[anchor_idx]
             end   = hist.iloc[-1]
@@ -105,7 +101,6 @@ def _classify(rows: List[MomentumRow]) -> tuple[List[MomentumRow], List[Momentum
     """Split into gainers and losers based on configured thresholds."""
     gainers = [r for r in rows if r.pct_change >= MOMENTUM_GAIN_THRESHOLD]
     losers  = [r for r in rows if r.pct_change <= MOMENTUM_LOSS_THRESHOLD]
-    # Strongest moves first
     gainers.sort(key=lambda r: r.pct_change, reverse=True)
     losers.sort(key=lambda r: r.pct_change)
     return gainers[:MOMENTUM_MAX_PER_SECTION], losers[:MOMENTUM_MAX_PER_SECTION]
@@ -119,7 +114,6 @@ def _e(text: str) -> str:
 
 
 def _table_html(rows: List[MomentumRow], title: str, color: str) -> str:
-    """Render a list of MomentumRows as an HTML table."""
     if not rows:
         return f'<p style="color:#6b7280;font-style:italic;">No {title.lower()}.</p>'
 
@@ -163,7 +157,6 @@ def _table_html(rows: List[MomentumRow], title: str, color: str) -> str:
 
 
 def _table_text(rows: List[MomentumRow], title: str) -> str:
-    """Plain-text fallback table."""
     if not rows:
         return f"{title}: none\n"
 
@@ -183,20 +176,22 @@ def _table_text(rows: List[MomentumRow], title: str) -> str:
 def _send_momentum_email(gainers: List[MomentumRow],
                         losers: List[MomentumRow],
                         total_scanned: int) -> bool:
-    """Send the consolidated momentum report email."""
     if not all([GMAIL_SENDER, GMAIL_APP_PASSWORD, GMAIL_RECIPIENT]):
         logger.error("Gmail credentials missing")
         return False
 
     now = datetime.now(IST).strftime("%d %b %Y · %H:%M IST")
 
-    # Date range for the report header (uses first row if available)
     sample = (gainers + losers)[:1]
     period = ""
     if sample:
         period = f"{sample[0].start_date} → {sample[0].end_date}"
 
-    summary = f"{len(gainers)} gainers (≥ +{MOMENTUM_GAIN_THRESHOLD:.0f}%) · {len(losers)} losers (≤ {MOMENTUM_LOSS_THRESHOLD:.0f}%) · {total_scanned} stocks scanned"
+    summary = (
+        f"{len(gainers)} gainers (≥ +{MOMENTUM_GAIN_THRESHOLD:.0f}%) · "
+        f"{len(losers)} losers (≤ {MOMENTUM_LOSS_THRESHOLD:.0f}%) · "
+        f"{total_scanned} stocks scanned"
+    )
 
     html_body = f"""
     <html><body style="background:#f9fafb;padding:16px;margin:0;
@@ -253,8 +248,37 @@ def _send_momentum_email(gainers: List[MomentumRow],
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+def _build_snapshot_items(gainers: List[MomentumRow],
+                          losers: List[MomentumRow]) -> List[dict]:
+    """Convert MomentumRow objects into JSON-friendly dicts."""
+    items = []
+    for r in gainers:
+        items.append({
+            "symbol":      r.symbol,
+            "name":        r.name,
+            "direction":   "gainer",
+            "pct_change":  round(r.pct_change, 2),
+            "start_price": round(r.start_price, 2),
+            "end_price":   round(r.end_price, 2),
+            "start_date":  r.start_date,
+            "end_date":    r.end_date,
+        })
+    for r in losers:
+        items.append({
+            "symbol":      r.symbol,
+            "name":        r.name,
+            "direction":   "loser",
+            "pct_change":  round(r.pct_change, 2),
+            "start_price": round(r.start_price, 2),
+            "end_price":   round(r.end_price, 2),
+            "start_date":  r.start_date,
+            "end_date":    r.end_date,
+        })
+    return items
+
+
 def run_momentum_report() -> dict:
-    """Fetch + classify + send. Returns stats dict for logging."""
+    """Fetch + classify + send + save snapshot."""
     logger.info("=" * 60)
     logger.info("Starting 30-day momentum report at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -274,6 +298,22 @@ def run_momentum_report() -> dict:
     gainers, losers = _classify(rows)
     logger.info("Gainers: %d  ·  Losers: %d  ·  Total scanned: %d",
                 len(gainers), len(losers), len(rows))
+
+    # --- Save snapshot for the dashboard (before email so it's saved even if email fails) ---
+    snapshot_items = _build_snapshot_items(gainers, losers)
+    period = ""
+    if gainers or losers:
+        sample = (gainers + losers)[0]
+        period = f"{sample.start_date} → {sample.end_date}"
+    save_snapshot("momentum", snapshot_items, {
+        "gainers_count":     len(gainers),
+        "losers_count":      len(losers),
+        "total_scanned":     len(rows),
+        "gain_threshold":    MOMENTUM_GAIN_THRESHOLD,
+        "loss_threshold":    MOMENTUM_LOSS_THRESHOLD,
+        "period":            period,
+        "report_time":       datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+    })
 
     sent = _send_momentum_email(gainers, losers, len(rows))
     if sent:
