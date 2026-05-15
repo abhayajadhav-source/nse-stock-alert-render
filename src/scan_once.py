@@ -4,11 +4,9 @@ Single-shot entry point — Render's cron service runs this once, then exits.
 Branches on RUN_MODE env var:
   "test"      → send a test email and exit
   "momentum"  → 30-day gainers/losers report
-  "reversal"  → trend reversal report (daily timeframe)
-  (default)   → intraday scanner (gap/breakout/52w/volume)
-
-Every report mode also saves a snapshot to Postgres so the dashboard
-can display the latest state without re-running the scan.
+  "reversal"  → trend reversal report
+  "journal"   → end-of-day journal (NEW)
+  (default)   → intraday scanner
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from config import (
     SCAN_END_TIME, SCAN_START_TIME,
 )
 from gmail_notifier import send_batch_alert, send_test_email
+from journal_report import run_journal_report
 from momentum_report import run_momentum_report
 from news_fetcher import NewsItem, fetch_news_for_stock
 from reversal_report import run_reversal_report
@@ -39,9 +38,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Intraday scanner helpers
-# ---------------------------------------------------------------------------
 def is_market_hours() -> bool:
     now = datetime.now(IST)
     if now.weekday() >= 5:
@@ -97,7 +93,6 @@ def rank_alerts(stocks: List[StockData]) -> List[StockData]:
 
 
 def _build_intraday_snapshot_items(stocks: List[StockData]) -> List[dict]:
-    """Convert StockData objects into JSON-friendly dicts for snapshot storage."""
     items = []
     for stock in stocks:
         items.append({
@@ -123,7 +118,6 @@ def _build_intraday_snapshot_items(stocks: List[StockData]) -> List[dict]:
 
 
 def run_intraday_scan() -> dict:
-    """Standard intraday scan — gap/breakout/52w/volume detection."""
     logger.info("=" * 60)
     logger.info("Starting intraday scan at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -138,7 +132,6 @@ def run_intraday_scan() -> dict:
     ranked   = rank_alerts(significant)
     to_alert = ranked[:MAX_ALERTS_PER_CYCLE]
 
-    # Cooldown filter
     alerts_to_send: List[Tuple[StockData, List[NewsItem]]] = []
     for stock in to_alert:
         signal = get_primary_signal(stock)
@@ -148,7 +141,6 @@ def run_intraday_scan() -> dict:
         news_items = fetch_news_for_stock(stock.symbol)
         alerts_to_send.append((stock, news_items))
 
-    # Send batch email if there's anything new
     sent = 0
     if alerts_to_send and EMAIL_BATCH_MODE:
         if send_batch_alert(alerts_to_send):
@@ -161,13 +153,10 @@ def run_intraday_scan() -> dict:
 
     cleanup_old_entries()
 
-    # --- Save snapshot for the dashboard ---
-    # We save ALL significant stocks (not just those that passed cooldown) so
-    # the dashboard reflects current state, not just freshly-emailed alerts.
     snapshot_items = _build_intraday_snapshot_items(ranked[:MAX_ALERTS_PER_CYCLE])
     save_snapshot("intraday", snapshot_items, {
-        "alerts_sent":  sent,
-        "scan_time":    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "alerts_sent":   sent,
+        "scan_time":     datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         "universe_size": len(symbols),
     })
 
@@ -178,17 +167,12 @@ def run_intraday_scan() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Main dispatcher
-# ---------------------------------------------------------------------------
 def main() -> int:
-    # --- Test mode ---
     if RUN_MODE == "test":
         logger.info("RUN_MODE=test → sending test email")
         ok = send_test_email()
         return 0 if ok else 1
 
-    # --- Momentum mode (30-day gainers/losers) ---
     if RUN_MODE == "momentum":
         logger.info("RUN_MODE=momentum → running 30-day momentum report")
         try:
@@ -199,7 +183,6 @@ def main() -> int:
             logger.exception("Momentum report failed: %s", e)
             return 1
 
-    # --- Reversal mode (trend reversal candidates) ---
     if RUN_MODE == "reversal":
         logger.info("RUN_MODE=reversal → running trend-reversal report")
         try:
@@ -210,7 +193,16 @@ def main() -> int:
             logger.exception("Reversal report failed: %s", e)
             return 1
 
-    # --- Default: intraday scanner, gated by market hours ---
+    if RUN_MODE == "journal":
+        logger.info("RUN_MODE=journal → running end-of-day journal")
+        try:
+            stats = run_journal_report()
+            logger.info("Journal complete: %s", stats)
+            return 0
+        except Exception as e:
+            logger.exception("Journal report failed: %s", e)
+            return 1
+
     if not FORCE_RUN and not is_market_hours():
         logger.info("Outside market hours — skipping intraday scan")
         return 0
