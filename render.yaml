@@ -1,8 +1,9 @@
-# Render Blueprint — three cron jobs sharing one Postgres database.
+# Render Blueprint — four cron jobs sharing one Postgres database.
 #
 # Job 1: nse-stock-alert         → intraday scanner, every 30 min, market hours
-# Job 2: nse-momentum-report     → 30-day gainers/losers, once daily at 17:30 IST
-# Job 3: nse-reversal-report     → trend reversal scan, once daily at 18:00 IST
+# Job 2: nse-momentum-report     → 30-day gainers/losers, daily 17:30 IST
+# Job 3: nse-reversal-report     → trend reversal scan, daily 18:00 IST
+# Job 4: nse-journal-report      → end-of-day journal, daily 16:00 IST (NEW)
 
 services:
   # ----------- Intraday scanner -----------
@@ -28,7 +29,7 @@ services:
     runtime: python
     plan: starter
     region: singapore
-    schedule: "0 12 * * 1-5"       # 12:00 UTC = 17:30 IST, Mon-Fri
+    schedule: "0 12 * * 1-5"       # 17:30 IST = 12:00 UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python src/scan_once.py
     envVars:
@@ -41,20 +42,42 @@ services:
           name: nse-alert-state
           property: connectionString
 
-  # ----------- Trend reversal report (NEW) -----------
+  # ----------- Trend reversal report -----------
   - type: cron
     name: nse-reversal-report
     runtime: python
     plan: starter
     region: singapore
-    schedule: "30 12 * * 1-5"      # 12:30 UTC = 18:00 IST, Mon-Fri
+    schedule: "30 12 * * 1-5"      # 18:00 IST = 12:30 UTC
     buildCommand: pip install -r requirements.txt
     startCommand: python src/scan_once.py
     envVars:
       - key: TZ
         value: Asia/Kolkata
-      - key: RUN_MODE              # triggers reversal mode
+      - key: RUN_MODE
         value: reversal
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nse-alert-state
+          property: connectionString
+
+  # ----------- End-of-day journal (NEW) -----------
+  # Runs at 16:00 IST = 10:30 UTC. After market close (15:30), giving 30 min
+  # for closing prices to settle. Runs BEFORE momentum (17:30) and reversal
+  # (18:00) so the journal captures only intraday alerts from earlier today.
+  - type: cron
+    name: nse-journal-report
+    runtime: python
+    plan: starter
+    region: singapore
+    schedule: "30 10 * * 1-5"      # 16:00 IST = 10:30 UTC, Mon-Fri
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/scan_once.py
+    envVars:
+      - key: TZ
+        value: Asia/Kolkata
+      - key: RUN_MODE
+        value: journal
       - key: DATABASE_URL
         fromDatabase:
           name: nse-alert-state
