@@ -194,6 +194,17 @@ def _fetch_rsi_row(symbol: str) -> Optional[RsiExtremeRow]:
                 bar_date                  = hist.index[-1].strftime("%d %b %Y"),
             )
         except Exception as e:
+            err_str = str(e).lower()
+            # Yahoo's "Too Many Requests" needs a longer backoff than other errors —
+            # use 5/10/15s instead of the default 1/2/3s
+            if "too many requests" in err_str or "rate limited" in err_str:
+                if attempt < YF_RETRIES:
+                    backoff = 5 * (attempt + 1)
+                    logger.info("Rate limited on %s; sleeping %ds before retry", symbol, backoff)
+                    time.sleep(backoff)
+                    continue
+                logger.warning("RSI fetch failed for %s after retries: %s", symbol, e)
+                return None
             if attempt < YF_RETRIES:
                 time.sleep(1 + attempt)
                 continue
@@ -433,12 +444,17 @@ def run_rsi_extremes_report() -> dict:
                 len(symbols), RSI_PERIOD, RSI_OVERBOUGHT, RSI_OVERSOLD, VOLUME_RATIO_MIN)
 
     rows: List[RsiExtremeRow] = []
+    # Pace requests at ~150ms apart to stay under Yahoo's per-second throttle.
+    # For a 126-stock universe this adds ~19s to the run (total still under 1 min).
+    INTER_REQUEST_DELAY = 0.15
+
     for i, symbol in enumerate(symbols, 1):
         if i % 25 == 0:
             logger.info("Progress: %d/%d (%d extremes so far)", i, len(symbols), len(rows))
         row = _fetch_rsi_row(symbol)
         if row is not None:
             rows.append(row)
+        time.sleep(INTER_REQUEST_DELAY)
 
     overbought, oversold = _classify(rows)
     extreme_ob = sum(1 for r in overbought if r.tier == "extreme")
