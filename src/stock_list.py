@@ -1,4 +1,17 @@
-"""NSE Stock universe — NIFTY 200 stocks with company name aliases."""
+"""NSE Stock universe — NIFTY 200 stocks with company name aliases.
+
+Recent corporate actions reflected (as of May 2026):
+  - ZOMATO  → ETERNAL    (renamed Apr 2025)
+  - MCDOWELL-N → UNITDSPR (renamed Jun 2024)
+  - GMRINFRA → GMRAIRPORT (renamed; the demerged power+urban-infra piece trades as GMRP&UI)
+  - MAZAGON  → MAZDOCK    (correct ticker for Mazagon Dock Shipbuilders)
+  - TATAMOTORS → TMPV (passenger vehicles + JLR) + new TMCV (commercial vehicles)
+    (split Oct 2025; TMCV listed Nov 2025 — both in F&O)
+
+Old `aliases` entries are preserved so news fetchers, AI prompts, and search
+recall still match historical names (e.g. someone searching "Zomato" will still
+find Eternal Limited articles).
+"""
 
 NSE_STOCKS = {
     "RELIANCE":   {"name": "Reliance Industries",       "aliases": ["Reliance", "RIL", "Mukesh Ambani"]},
@@ -26,7 +39,11 @@ NSE_STOCKS = {
     "NTPC":       {"name": "NTPC",                       "aliases": ["NTPC"]},
     "POWERGRID":  {"name": "Power Grid Corp",            "aliases": ["Power Grid", "PowerGrid"]},
     "M&M":        {"name": "Mahindra & Mahindra",        "aliases": ["Mahindra & Mahindra", "M&M"]},
-    "TATAMOTORS": {"name": "Tata Motors",                "aliases": ["Tata Motors"]},
+    # Tata Motors split into two listed entities in Oct 2025 — both in F&O:
+    #   TMPV = passenger vehicles + JLR (former TATAMOTORS, renamed)
+    #   TMCV = commercial vehicles (newly listed Nov 2025)
+    "TMPV":       {"name": "Tata Motors Passenger Vehicles", "aliases": ["Tata Motors PV", "TMPV", "Tata Motors", "TATAMOTORS"]},
+    "TMCV":       {"name": "Tata Motors (Commercial)",       "aliases": ["Tata Motors CV", "TMCV", "TML Commercial Vehicles"]},
     "TATASTEEL":  {"name": "Tata Steel",                 "aliases": ["Tata Steel"]},
     "ADANIENT":   {"name": "Adani Enterprises",          "aliases": ["Adani Enterprises", "Adani"]},
     "ADANIPORTS": {"name": "Adani Ports",                "aliases": ["Adani Ports"]},
@@ -70,7 +87,8 @@ NSE_STOCKS = {
     "ADANIGREEN": {"name": "Adani Green Energy",         "aliases": ["Adani Green"]},
     "ADANIPOWER": {"name": "Adani Power",                "aliases": ["Adani Power"]},
     "TATAPOWER":  {"name": "Tata Power",                 "aliases": ["Tata Power"]},
-    "ZOMATO":     {"name": "Zomato",                     "aliases": ["Zomato", "Eternal"]},
+    # Zomato Ltd renamed to Eternal Ltd, ticker ZOMATO → ETERNAL effective Apr 9, 2025
+    "ETERNAL":    {"name": "Eternal Limited",            "aliases": ["Eternal", "Zomato", "Blinkit", "Hyperpure"]},
     "PAYTM":      {"name": "One 97 Communications",      "aliases": ["Paytm"]},
     "NYKAA":      {"name": "FSN E-Commerce Ventures",    "aliases": ["Nykaa"]},
     "POLICYBZR":  {"name": "PB Fintech",                 "aliases": ["PB Fintech", "PolicyBazaar"]},
@@ -115,7 +133,8 @@ NSE_STOCKS = {
     "SBICARD":    {"name": "SBI Cards",                  "aliases": ["SBI Cards"]},
     "PIIND":      {"name": "PI Industries",              "aliases": ["PI Industries"]},
     "NAUKRI":     {"name": "Info Edge India",            "aliases": ["Info Edge", "Naukri"]},
-    "MCDOWELL-N": {"name": "United Spirits",             "aliases": ["United Spirits", "McDowell"]},
+    # McDowell-N renamed to United Spirits, ticker MCDOWELL-N → UNITDSPR effective Jun 7, 2024
+    "UNITDSPR":   {"name": "United Spirits",             "aliases": ["United Spirits", "McDowell", "Diageo India"]},
     "GODREJPROP": {"name": "Godrej Properties",          "aliases": ["Godrej Properties"]},
     "OBEROIRLTY": {"name": "Oberoi Realty",              "aliases": ["Oberoi Realty"]},
     "LODHA":      {"name": "Macrotech Developers",       "aliases": ["Lodha", "Macrotech"]},
@@ -123,10 +142,12 @@ NSE_STOCKS = {
     "IDEA":       {"name": "Vodafone Idea",              "aliases": ["Vodafone Idea", "Vi"]},
     "RVNL":       {"name": "Rail Vikas Nigam",           "aliases": ["RVNL", "Rail Vikas"]},
     "NMDC":       {"name": "NMDC Limited",               "aliases": ["NMDC"]},
-    "MAZAGON":    {"name": "Mazagon Dock Shipbuilders",  "aliases": ["Mazagon Dock"]},
+    # Correct NSE ticker is MAZDOCK (not MAZAGON) for Mazagon Dock Shipbuilders
+    "MAZDOCK":    {"name": "Mazagon Dock Shipbuilders",  "aliases": ["Mazagon Dock", "MDL"]},
     "COCHINSHIP": {"name": "Cochin Shipyard",            "aliases": ["Cochin Shipyard"]},
     "BDL":        {"name": "Bharat Dynamics",            "aliases": ["Bharat Dynamics", "BDL"]},
-    "GMRINFRA":   {"name": "GMR Airports Infrastructure","aliases": ["GMR Airports", "GMR Infrastructure"]},
+    # GMR Infrastructure renamed to GMR Airports, ticker GMRINFRA → GMRAIRPORT
+    "GMRAIRPORT": {"name": "GMR Airports",               "aliases": ["GMR Airports", "GMR Infrastructure"]},
 }
 
 
