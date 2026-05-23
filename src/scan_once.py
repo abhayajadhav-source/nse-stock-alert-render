@@ -2,11 +2,12 @@
 Single-shot entry point — Render's cron service runs this once, then exits.
 
 Branches on RUN_MODE env var:
-  "test"      → send a test email and exit
-  "momentum"  → 30-day gainers/losers report
-  "reversal"  → trend reversal report
-  "journal"   → end-of-day journal (NEW)
-  (default)   → intraday scanner
+  "test"          → send a test email and exit
+  "momentum"      → 30-day gainers/losers report
+  "reversal"      → trend reversal report
+  "rsi_extremes"  → daily RSI overbought/oversold + volume conviction report
+  "journal"       → end-of-day journal
+  (default)       → intraday scanner
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from journal_report import run_journal_report
 from momentum_report import run_momentum_report
 from news_fetcher import NewsItem, fetch_news_for_stock
 from reversal_report import run_reversal_report
+from rsi_extremes_report import run_rsi_extremes_report
 from snapshot_store import save_snapshot
 from state_manager import cleanup_old_entries, mark_alert_sent, should_send_alert
 from stock_analyzer import StockData, fetch_stock_data
@@ -191,6 +193,16 @@ def main() -> int:
             return 0
         except Exception as e:
             logger.exception("Reversal report failed: %s", e)
+            return 1
+
+    if RUN_MODE == "rsi_extremes":
+        logger.info("RUN_MODE=rsi_extremes → running daily RSI extremes report")
+        try:
+            stats = run_rsi_extremes_report()
+            logger.info("RSI extremes complete: %s", stats)
+            return 0
+        except Exception as e:
+            logger.exception("RSI extremes report failed: %s", e)
             return 1
 
     if RUN_MODE == "journal":
