@@ -1,16 +1,22 @@
 """
-Fundamentals fetcher — pulls PE, EPS, ROE, 3Y avg profit growth, FII holding %.
+Fundamentals fetcher — pulls PE, EPS, ROE, 3Y avg profit growth, Promoter holding %.
 
 Design philosophy:
-  - Yahoo Finance for the 4 stable metrics (one .info call + one .income_stmt call)
-  - NSE scraper for FII holding % (fragile, may break — graceful fallback)
+  - All 5 metrics from Yahoo Finance (.info + .income_stmt)
   - Postgres cache with 7-day TTL since fundamentals don't change daily
   - Never raises — always returns a Fundamentals object with None for missing fields
 
+Why Promoter holding instead of FII:
+  - FII per-stock data is only published quarterly (lagging)
+  - NSE has no clean API for it; scraping is fragile
+  - Promoter holding is a stronger signal anyway for Indian retail
+    (high + stable promoter holding = insider confidence)
+  - Yahoo Finance has it reliably for every NSE F&O stock
+
 The 7-day TTL is intentional:
   - PE/EPS update at quarterly results, not daily — caching saves ~250 API calls/day
-  - FII holdings disclosed quarterly on NSE — no point fetching more than weekly
-  - Reduces Yahoo rate-limit pressure (we already pace at 150ms in scanners)
+  - Promoter holdings disclosed quarterly — no point refreshing more than weekly
+  - Reduces Yahoo rate-limit pressure
 """
 
 from __future__ import annotations
@@ -19,11 +25,10 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import psycopg2
-import requests
 import yfinance as yf
 
 from config import IST, YF_RETRIES
@@ -32,7 +37,6 @@ from stock_list import get_yf_symbol
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_HOURS = 7 * 24   # 7 days
-NSE_TIMEOUT_SEC = 8
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
@@ -46,7 +50,7 @@ class Fundamentals:
     eps:                     Optional[float] = None
     roe_pct:                 Optional[float] = None    # already in %, not decimal
     profit_growth_3y_pct:    Optional[float] = None    # CAGR %, can be negative
-    fii_holding_pct:         Optional[float] = None    # %
+    promoter_holding_pct:    Optional[float] = None    # % held by insiders/promoters
     fetched_at:              Optional[str]   = None    # ISO string
 
 
@@ -54,7 +58,13 @@ class Fundamentals:
 # Postgres cache
 # ---------------------------------------------------------------------------
 def _ensure_cache_table() -> None:
-    """Create the fundamentals_cache table if it doesn't exist."""
+    """
+    Create the fundamentals_cache table if it doesn't exist.
+
+    Note: if you previously deployed the FII version of this module, there will
+    be an old `fii_holding_pct` column in this table. That's fine — it just
+    sits unused. We ALTER TABLE to add the new column on first run.
+    """
     if not DATABASE_URL:
         return
     try:
@@ -67,9 +77,14 @@ def _ensure_cache_table() -> None:
                         eps                   NUMERIC,
                         roe_pct               NUMERIC,
                         profit_growth_3y_pct  NUMERIC,
-                        fii_holding_pct       NUMERIC,
                         fetched_at            TIMESTAMP WITH TIME ZONE NOT NULL
                     )
+                """)
+                # Add the new column if it doesn't exist (idempotent migration
+                # from the previous FII-based schema)
+                cur.execute("""
+                    ALTER TABLE fundamentals_cache
+                    ADD COLUMN IF NOT EXISTS promoter_holding_pct NUMERIC
                 """)
     except Exception as e:
         logger.warning("Could not ensure fundamentals_cache table: %s", e)
@@ -84,7 +99,7 @@ def _cache_get(symbol: str) -> Optional[Fundamentals]:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT pe_ratio, eps, roe_pct, profit_growth_3y_pct,
-                           fii_holding_pct, fetched_at
+                           promoter_holding_pct, fetched_at
                     FROM fundamentals_cache
                     WHERE symbol = %s
                 """, (symbol,))
@@ -101,7 +116,7 @@ def _cache_get(symbol: str) -> Optional[Fundamentals]:
                     eps                  = float(row[1]) if row[1] is not None else None,
                     roe_pct              = float(row[2]) if row[2] is not None else None,
                     profit_growth_3y_pct = float(row[3]) if row[3] is not None else None,
-                    fii_holding_pct      = float(row[4]) if row[4] is not None else None,
+                    promoter_holding_pct = float(row[4]) if row[4] is not None else None,
                     fetched_at           = fetched_at.isoformat(),
                 )
     except Exception as e:
@@ -119,18 +134,18 @@ def _cache_set(f: Fundamentals) -> None:
                 cur.execute("""
                     INSERT INTO fundamentals_cache
                         (symbol, pe_ratio, eps, roe_pct, profit_growth_3y_pct,
-                         fii_holding_pct, fetched_at)
+                         promoter_holding_pct, fetched_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (symbol) DO UPDATE SET
                         pe_ratio             = EXCLUDED.pe_ratio,
                         eps                  = EXCLUDED.eps,
                         roe_pct              = EXCLUDED.roe_pct,
                         profit_growth_3y_pct = EXCLUDED.profit_growth_3y_pct,
-                        fii_holding_pct      = EXCLUDED.fii_holding_pct,
+                        promoter_holding_pct = EXCLUDED.promoter_holding_pct,
                         fetched_at           = EXCLUDED.fetched_at
                 """, (
                     f.symbol, f.pe_ratio, f.eps, f.roe_pct,
-                    f.profit_growth_3y_pct, f.fii_holding_pct,
+                    f.profit_growth_3y_pct, f.promoter_holding_pct,
                     datetime.now(IST),
                 ))
     except Exception as e:
@@ -138,17 +153,23 @@ def _cache_set(f: Fundamentals) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Yahoo Finance — PE, EPS, ROE, 3Y profit growth
+# Yahoo Finance — all 5 metrics
 # ---------------------------------------------------------------------------
 def _fetch_from_yahoo(symbol: str) -> dict:
     """
-    Pull PE, EPS, ROE from .info, then compute 3-year profit growth from
-    annual income statements.
+    Pull PE, EPS, ROE, promoter holding from .info, then compute 3-year profit
+    growth from annual income statements.
 
-    Returns dict with keys: pe_ratio, eps, roe_pct, profit_growth_3y_pct.
-    Each may be None if Yahoo doesn't have that field.
+    Returns dict with keys: pe_ratio, eps, roe_pct, profit_growth_3y_pct,
+    promoter_holding_pct. Each may be None if Yahoo doesn't have that field.
     """
-    out = {"pe_ratio": None, "eps": None, "roe_pct": None, "profit_growth_3y_pct": None}
+    out = {
+        "pe_ratio":             None,
+        "eps":                  None,
+        "roe_pct":              None,
+        "profit_growth_3y_pct": None,
+        "promoter_holding_pct": None,
+    }
     yf_symbol = get_yf_symbol(symbol)
 
     for attempt in range(YF_RETRIES + 1):
@@ -159,24 +180,29 @@ def _fetch_from_yahoo(symbol: str) -> dict:
             info = ticker.info or {}
             out["pe_ratio"] = info.get("trailingPE")
             out["eps"]      = info.get("trailingEps")
+
             roe = info.get("returnOnEquity")
             # Yahoo returns ROE as a decimal (e.g. 0.18 = 18%); we want %.
             if roe is not None:
                 out["roe_pct"] = roe * 100 if abs(roe) < 5 else roe
 
+            # Promoter holding = "% held by insiders" in Yahoo terminology.
+            # For Indian stocks, Yahoo populates this with promoter group data.
+            # Returned as a decimal (e.g. 0.50 = 50%); convert to %.
+            promoter = info.get("heldPercentInsiders")
+            if promoter is not None:
+                out["promoter_holding_pct"] = promoter * 100 if abs(promoter) < 5 else promoter
+
             # --- 3-year profit growth — separate API call ---
-            # Use income_stmt (yearly). Newer fields first.
             try:
                 income = ticker.income_stmt
                 if income is not None and not income.empty:
-                    # "Net Income" row, columns = years (most recent first)
                     if "Net Income" in income.index:
                         net_income_series = income.loc["Net Income"].dropna()
                         # Need at least 3+ years of data for a 3Y CAGR
                         if len(net_income_series) >= 4:
-                            latest = float(net_income_series.iloc[0])   # most recent year
-                            earlier = float(net_income_series.iloc[3])  # 3 years ago
-                            # Avoid div-by-zero or sign flip nonsense
+                            latest = float(net_income_series.iloc[0])
+                            earlier = float(net_income_series.iloc[3])
                             if earlier > 0 and latest > 0:
                                 cagr = ((latest / earlier) ** (1 / 3) - 1) * 100
                                 out["profit_growth_3y_pct"] = cagr
@@ -206,130 +232,6 @@ def _fetch_from_yahoo(symbol: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# NSE scraper — FII holding %
-# ---------------------------------------------------------------------------
-# WARNING: This is the fragile part. NSE changes their site sometimes, blocks
-# requests without proper headers, and rate-limits aggressively. Wrap in
-# try/except and always tolerate None.
-#
-# Approach: fetch the corporate-info shareholding endpoint. It returns a JSON
-# response with quarterly shareholding patterns, including the FII column.
-# If anything fails (404, 403, JSON parse error, missing field), return None.
-
-NSE_BASE = "https://www.nseindia.com"
-NSE_SHAREHOLDING_URL = (
-    f"{NSE_BASE}/api/corporate-share-holdings-master"
-    "?index=equities&symbol={symbol}"
-)
-NSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": f"{NSE_BASE}/companies-listing/corporate-filings-shareholding",
-}
-
-# Module-level session to share cookies across requests in one cron run
-_nse_session: Optional[requests.Session] = None
-
-
-def _get_nse_session() -> Optional[requests.Session]:
-    """
-    NSE requires you to "visit" the homepage first to get cookies, then use those
-    cookies for API calls. We do this once per cron run and reuse the session.
-    """
-    global _nse_session
-    if _nse_session is not None:
-        return _nse_session
-    try:
-        s = requests.Session()
-        s.headers.update(NSE_HEADERS)
-        # Warm up — get cookies
-        s.get(NSE_BASE, timeout=NSE_TIMEOUT_SEC)
-        _nse_session = s
-        return s
-    except Exception as e:
-        logger.warning("NSE session warm-up failed: %s", e)
-        return None
-
-
-def _fetch_fii_pct(symbol: str) -> Optional[float]:
-    """
-    Scrape FII holding % from NSE's shareholding API.
-
-    Returns:
-      - float: FII percentage if found
-      - None:  on any failure (NSE blocked, JSON malformed, field missing, etc.)
-    """
-    session = _get_nse_session()
-    if session is None:
-        return None
-
-    url = NSE_SHAREHOLDING_URL.format(symbol=symbol)
-    try:
-        resp = session.get(url, timeout=NSE_TIMEOUT_SEC)
-        if resp.status_code != 200:
-            logger.debug("NSE FII HTTP %d for %s", resp.status_code, symbol)
-            return None
-
-        data = resp.json()
-
-        # NSE's shareholding response shape varies. We try several known paths.
-        # Most common path: top-level list of quarterly snapshots, each with
-        # category-wise breakdown including FII (Foreign Institutional Investors).
-        if isinstance(data, list) and data:
-            # Most recent quarter is usually first
-            latest = data[0]
-        elif isinstance(data, dict) and "data" in data:
-            inner = data["data"]
-            if isinstance(inner, list) and inner:
-                latest = inner[0]
-            else:
-                latest = inner
-        elif isinstance(data, dict):
-            latest = data
-        else:
-            return None
-
-        # Search for FII field — names vary across NSE responses
-        candidate_keys = [
-            "fii", "FII", "fiiHolding", "fii_holding",
-            "foreignInstitutions", "foreignInstitutionalInvestors",
-            "fpi", "FPI",   # FPI (Foreign Portfolio Investors) often used instead of FII
-            "fpiHolding",
-        ]
-        if isinstance(latest, dict):
-            for k in candidate_keys:
-                if k in latest and latest[k] is not None:
-                    try:
-                        return float(latest[k])
-                    except (TypeError, ValueError):
-                        continue
-
-            # Last resort — look for a category list inside the record
-            categories = latest.get("categories") or latest.get("shareholding") or []
-            if isinstance(categories, list):
-                for cat in categories:
-                    if not isinstance(cat, dict):
-                        continue
-                    name = (cat.get("category") or cat.get("name") or "").lower()
-                    if "foreign" in name and "institut" in name:
-                        try:
-                            return float(cat.get("percentage") or cat.get("pct"))
-                        except (TypeError, ValueError):
-                            continue
-
-        return None
-
-    except Exception as e:
-        logger.debug("NSE FII fetch failed for %s: %s", symbol, e)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 def get_fundamentals(symbol: str, use_cache: bool = True) -> Fundamentals:
@@ -350,7 +252,6 @@ def get_fundamentals(symbol: str, use_cache: bool = True) -> Fundamentals:
 
     # Cache miss — fetch fresh
     y = _fetch_from_yahoo(symbol)
-    fii = _fetch_fii_pct(symbol)
 
     fundamentals = Fundamentals(
         symbol               = symbol,
@@ -358,7 +259,7 @@ def get_fundamentals(symbol: str, use_cache: bool = True) -> Fundamentals:
         eps                  = y.get("eps"),
         roe_pct              = y.get("roe_pct"),
         profit_growth_3y_pct = y.get("profit_growth_3y_pct"),
-        fii_holding_pct      = fii,
+        promoter_holding_pct = y.get("promoter_holding_pct"),
         fetched_at           = datetime.now(IST).isoformat(),
     )
 
