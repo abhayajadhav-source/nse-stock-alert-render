@@ -287,7 +287,7 @@ def _build_snapshot_items(gainers: List[MomentumRow],
             "eps":                  round(fund.eps, 2) if fund.eps is not None else None,
             "roe_pct":              round(fund.roe_pct, 2) if fund.roe_pct is not None else None,
             "profit_growth_3y_pct": round(fund.profit_growth_3y_pct, 2) if fund.profit_growth_3y_pct is not None else None,
-            "fii_holding_pct":      round(fund.fii_holding_pct, 2) if fund.fii_holding_pct is not None else None,
+            "promoter_holding_pct": round(fund.promoter_holding_pct, 2) if fund.promoter_holding_pct is not None else None,
         })
     return items
 
