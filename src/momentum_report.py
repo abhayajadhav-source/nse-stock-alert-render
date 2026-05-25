@@ -6,8 +6,9 @@ runs regardless of market hours, because it operates on closing prices
 that are already final.
 
 Output:
-  1. One email with two tables: top gainers and top losers
-  2. Snapshot saved to Postgres for the dashboard
+  1. One email with two tables: top gainers and top losers (no fundamentals)
+  2. Snapshot saved to Postgres for the dashboard (WITH fundamentals:
+     PE, EPS, ROE, 3Y profit growth, FII holding %)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from config import (
     MOMENTUM_GAIN_THRESHOLD, MOMENTUM_LOOKBACK_DAYS, MOMENTUM_LOSS_THRESHOLD,
     MOMENTUM_MAX_PER_SECTION, MOMENTUM_SUBJECT_PREFIX, YF_RETRIES,
 )
+from fundamentals_fetcher import get_fundamentals
 from snapshot_store import save_snapshot
 from stock_list import NSE_STOCKS, get_all_symbols, get_yf_symbol
 
@@ -53,7 +55,7 @@ class MomentumRow:
 
 
 # ---------------------------------------------------------------------------
-# Price fetching — 30-day window
+# Price fetching — 30-day window (unchanged)
 # ---------------------------------------------------------------------------
 def _fetch_momentum_row(symbol: str) -> Optional[MomentumRow]:
     """Fetch ~30 trading days of bars and compute % change from first to last close."""
@@ -107,7 +109,7 @@ def _classify(rows: List[MomentumRow]) -> tuple[List[MomentumRow], List[Momentum
 
 
 # ---------------------------------------------------------------------------
-# Email rendering
+# Email rendering — UNCHANGED (no fundamentals in email per your spec)
 # ---------------------------------------------------------------------------
 def _e(text: str) -> str:
     return html.escape(text or "")
@@ -171,7 +173,7 @@ def _table_text(rows: List[MomentumRow], title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Email send
+# Email send (unchanged)
 # ---------------------------------------------------------------------------
 def _send_momentum_email(gainers: List[MomentumRow],
                         losers: List[MomentumRow],
@@ -246,39 +248,55 @@ def _send_momentum_email(gainers: List[MomentumRow],
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Snapshot builder — NOW WITH FUNDAMENTALS for dashboard
 # ---------------------------------------------------------------------------
 def _build_snapshot_items(gainers: List[MomentumRow],
                           losers: List[MomentumRow]) -> List[dict]:
-    """Convert MomentumRow objects into JSON-friendly dicts."""
+    """
+    Convert MomentumRow objects into JSON-friendly dicts.
+
+    Attaches 5 fundamentals from fundamentals_fetcher (PE, EPS, ROE, 3Y profit
+    growth, FII holding %). Fundamentals are cached for 7 days in Postgres, so
+    the first run after a fresh cache takes longer (~3-5 min) but subsequent
+    daily runs are near-instant for the fundamentals part.
+
+    Missing values are stored as None (rendered as "—" on the dashboard).
+    """
     items = []
-    for r in gainers:
+    all_rows = list(gainers) + list(losers)
+    total = len(all_rows)
+    logger.info("Attaching fundamentals to %d momentum rows...", total)
+
+    for i, r in enumerate(all_rows, 1):
+        if i % 5 == 0:
+            logger.info("  Fundamentals progress: %d/%d", i, total)
+        # Determine direction from the source list
+        direction = "gainer" if r in gainers else "loser"
+        fund = get_fundamentals(r.symbol)
         items.append({
-            "symbol":      r.symbol,
-            "name":        r.name,
-            "direction":   "gainer",
-            "pct_change":  round(r.pct_change, 2),
-            "start_price": round(r.start_price, 2),
-            "end_price":   round(r.end_price, 2),
-            "start_date":  r.start_date,
-            "end_date":    r.end_date,
-        })
-    for r in losers:
-        items.append({
-            "symbol":      r.symbol,
-            "name":        r.name,
-            "direction":   "loser",
-            "pct_change":  round(r.pct_change, 2),
-            "start_price": round(r.start_price, 2),
-            "end_price":   round(r.end_price, 2),
-            "start_date":  r.start_date,
-            "end_date":    r.end_date,
+            "symbol":               r.symbol,
+            "name":                 r.name,
+            "direction":            direction,
+            "pct_change":           round(r.pct_change, 2),
+            "start_price":          round(r.start_price, 2),
+            "end_price":            round(r.end_price, 2),
+            "start_date":           r.start_date,
+            "end_date":             r.end_date,
+            # Fundamentals (any may be None)
+            "pe_ratio":             round(fund.pe_ratio, 2) if fund.pe_ratio is not None else None,
+            "eps":                  round(fund.eps, 2) if fund.eps is not None else None,
+            "roe_pct":              round(fund.roe_pct, 2) if fund.roe_pct is not None else None,
+            "profit_growth_3y_pct": round(fund.profit_growth_3y_pct, 2) if fund.profit_growth_3y_pct is not None else None,
+            "fii_holding_pct":      round(fund.fii_holding_pct, 2) if fund.fii_holding_pct is not None else None,
         })
     return items
 
 
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 def run_momentum_report() -> dict:
-    """Fetch + classify + send + save snapshot."""
+    """Fetch + classify + send + save snapshot (with fundamentals for dashboard)."""
     logger.info("=" * 60)
     logger.info("Starting 30-day momentum report at %s IST",
                 datetime.now(IST).strftime("%H:%M:%S"))
@@ -300,6 +318,8 @@ def run_momentum_report() -> dict:
                 len(gainers), len(losers), len(rows))
 
     # --- Save snapshot for the dashboard (before email so it's saved even if email fails) ---
+    # This is where fundamentals get attached. With 7-day Postgres cache, this is fast
+    # after the first run; first run may take 3-5 min as it warms the cache.
     snapshot_items = _build_snapshot_items(gainers, losers)
     period = ""
     if gainers or losers:
