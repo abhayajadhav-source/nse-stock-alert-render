@@ -1,0 +1,32 @@
+# NSE scanner schedule for the Oracle VM, mirrors render.yaml's four cron
+# jobs 1:1 (this repo currently runs FOUR jobs, not one -- easy to miss if
+# you only skim the runbook's simplified Step 8 example).
+#
+# Entry point is src/scan_once.py (not scan_once.py at repo root).
+#
+# Schedule times below are UTC, exactly as Render stores them (Render cron
+# schedules are always UTC regardless of the TZ env var) -- kept as-is
+# instead of converting the VM to IST, since half-hour offsets don't map
+# cleanly onto cron's hour ranges. TZ=Asia/Kolkata in /etc/nse/api.env
+# still makes the scripts' own IST-aware logic (market-hours checks,
+# timestamps in emails) behave correctly.
+#
+# Install (APPENDS to the existing crontab -- `crontab deploy/nse-scanners.cron`
+# would instead REPLACE it, wiping out deploy.sh's entry from the API repo
+# if that's already installed):
+#   ( crontab -l 2>/dev/null; cat deploy/nse-scanners.cron ) | crontab -
+#
+# Verify: tail -f /var/log/nse-scan-intraday.log during market hours, and
+# check the `snapshots` table gets a fresh `updated_at` after a run.
+
+# Intraday scanner -- every 30 min, 03:00-10:30 UTC (~09:00-16:00 IST), Mon-Fri
+*/30 3-10 * * 1-5 cd /home/ubuntu/nse-stock-alert-render && set -a && . /etc/nse/api.env && set +a && .venv/bin/python src/scan_once.py >> /var/log/nse-scan-intraday.log 2>&1
+
+# 30-day momentum report -- 12:00 UTC (17:30 IST), Mon-Fri
+0 12 * * 1-5 cd /home/ubuntu/nse-stock-alert-render && set -a && . /etc/nse/api.env && set +a && RUN_MODE=momentum .venv/bin/python src/scan_once.py >> /var/log/nse-momentum.log 2>&1
+
+# Trend reversal report -- 12:30 UTC (18:00 IST), Mon-Fri
+30 12 * * 1-5 cd /home/ubuntu/nse-stock-alert-render && set -a && . /etc/nse/api.env && set +a && RUN_MODE=reversal .venv/bin/python src/scan_once.py >> /var/log/nse-reversal.log 2>&1
+
+# End-of-day journal report -- 10:30 UTC (16:00 IST), Mon-Fri
+30 10 * * 1-5 cd /home/ubuntu/nse-stock-alert-render && set -a && . /etc/nse/api.env && set +a && RUN_MODE=journal .venv/bin/python src/scan_once.py >> /var/log/nse-journal.log 2>&1
